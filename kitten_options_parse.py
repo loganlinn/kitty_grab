@@ -16,6 +16,12 @@ class Parser:
     def selection_background(self, val: str, ans: typing.Dict[str, typing.Any]) -> None:
         ans['selection_background'] = to_color(val)
 
+    def search_background(self, val: str, ans: typing.Dict[str, typing.Any]) -> None:
+        ans['search_background'] = to_color(val)
+
+    def search_foreground(self, val: str, ans: typing.Dict[str, typing.Any]) -> None:
+        ans['search_foreground'] = to_color(val)
+
     def selection_foreground(self, val: str, ans: typing.Dict[str, typing.Any]) -> None:
         ans['selection_foreground'] = to_color(val)
 

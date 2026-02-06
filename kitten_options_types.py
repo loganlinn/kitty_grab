@@ -12,6 +12,8 @@ import kitty.types
 option_names = (  # {{{
  'cursor',
  'map',
+ 'search_background',
+ 'search_foreground',
  'select_by_word_characters',
  'selection_background',
  'selection_foreground')  # }}}
@@ -19,6 +21,8 @@ option_names = (  # {{{
 
 class Options:
     cursor: Color = Color(173, 127, 168)
+    search_background: Color = Color(255, 255, 0)
+    search_foreground: Color = Color(0, 0, 0)
     select_by_word_characters: str = ''
     selection_background: Color = Color(82, 148, 226)
     selection_foreground: Color = Color(255, 255, 255)
@@ -175,4 +179,10 @@ defaults.map = [
     (ParsedShortcut(mods=4, key_name='v'), KeyAction('set_mode', ('block',))),  # noqa
     # set_mode
     (ParsedShortcut(mods=4, key_name='LeftBracket'), KeyAction('set_mode', ('normal',))),  # noqa
+    # search
+    (ParsedShortcut(mods=0, key_name='/'), KeyAction('search')),  # noqa
+    # search_next
+    (ParsedShortcut(mods=0, key_name='n'), KeyAction('search_next')),  # noqa
+    # search_prev
+    (ParsedShortcut(mods=0, key_name='N'), KeyAction('search_prev')),  # noqa
 ]

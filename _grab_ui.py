@@ -412,6 +412,16 @@ class GrabHandler(Handler):
         # s — secondary
         self.copy_to = {'primary': b'p', 'secondary': b's'}.get(args.copy_to, b'c')
 
+        # search state
+        self.search_query = ''                                         # type: str
+        self.search_matches = []                                       # type: List[Tuple[int, ScreenColumn, ScreenColumn]]
+        self.search_current_idx = 0                                    # type: int
+        self.search_active = False                                     # type: bool
+        self.search_confirmed = False                                  # type: bool
+        self.pre_search_point = None                                   # type: Optional[Position]
+        self.pre_search_mark = None                                    # type: Optional[Position]
+        self.pre_search_mark_type = None                               # type: Optional[Type[Region]]
+        self.pre_search_mode = None                                    # type: Optional[ModeTypeStr]
 
         for spec, action in self.opts.map:
             self.add_shortcut(action, spec)
@@ -437,22 +447,43 @@ class GrabHandler(Handler):
             self.cmd.set_cursor_position(0, y)
             self.print('{}{}'.format(selection_sgr, plain),
                        end=clear_eol)
+            self._draw_search_highlights(current_line, y, plain, selection_sgr)
             return
 
         self.cmd.set_cursor_position(0, y)
         self.print('{}{}'.format(sgr0, line), end=clear_eol)
 
-        if self.mark_type.line_outside_region(current_line, start, end):
-            return
+        if not self.mark_type.line_outside_region(current_line, start, end):
+            start_x, end_x = self.mark_type.selection_in_line(
+                current_line, start, end, wcswidth(plain))
+            if start_x is not None and end_x is not None:
+                line_slice, half = string_slice(plain, start_x, end_x)
+                self.cmd.set_cursor_position(start_x - (1 if half else 0), y)
+                self.print('{}{}'.format(selection_sgr, line_slice), end='')
 
-        start_x, end_x = self.mark_type.selection_in_line(
-            current_line, start, end, wcswidth(plain))
-        if start_x is None or end_x is None:
-            return
+        self._draw_search_highlights(current_line, y, plain, selection_sgr)
 
-        line_slice, half = string_slice(plain, start_x, end_x)
-        self.cmd.set_cursor_position(start_x - (1 if half else 0), y)
-        self.print('{}{}'.format(selection_sgr, line_slice), end='')
+    def _draw_search_highlights(self, current_line: AbsoluteLine,
+                                y: ScreenLine, plain: str,
+                                selection_sgr: str) -> None:
+        if not self.search_matches:
+            return
+        search_sgr = '\x1b[38{};48{}m'.format(
+            color_as_sgr(self.opts.search_foreground),
+            color_as_sgr(self.opts.search_background))
+        cur_match = self.search_matches[self.search_current_idx] if self.search_matches else None
+        for line_no, start_col, end_col in self.search_matches:
+            if line_no != current_line:
+                continue
+            is_current = (cur_match is not None
+                          and line_no == cur_match[0]
+                          and start_col == cur_match[1]
+                          and end_col == cur_match[2])
+            sgr = selection_sgr if is_current else search_sgr
+            if end_col > start_col:
+                line_slice, half = string_slice(plain, start_col, end_col)
+                self.cmd.set_cursor_position(start_col - (1 if half else 0), y)
+                self.print('{}{}'.format(sgr, line_slice), end='')
 
     def _update(self) -> None:
         self.cmd.set_window_title('Grab – {} {} {},{}+{} to {},{}+{}'.format(
@@ -461,7 +492,13 @@ class GrabHandler(Handler):
             getattr(self.mark, 'x', None), getattr(self.mark, 'y', None),
             getattr(self.mark, 'top_line', None),
             self.point.x, self.point.y, self.point.top_line))
-        self.cmd.set_cursor_position(self.point.x, self.point.y)
+        if self.search_active:
+            # cursor at end of search query in search bar
+            self.cmd.set_cursor_position(
+                len(self.search_query) + 1,  # +1 for '/'
+                self.screen_size.rows - 1)
+        else:
+            self.cmd.set_cursor_position(self.point.x, self.point.y)
 
     def _redraw_lines(self, lines: Iterable[AbsoluteLine]) -> None:
         for line in lines:
@@ -469,24 +506,188 @@ class GrabHandler(Handler):
         self._update()
 
     def _redraw(self) -> None:
+        rows = self.screen_size.rows
+        if self.search_active:
+            rows -= 1
         self._redraw_lines(range(
             self.point.top_line,
-            self.point.top_line + self.screen_size.rows))
+            self.point.top_line + rows))
+        if self.search_active:
+            self._draw_search_bar()
+
+    def _draw_search_bar(self) -> None:
+        y = self.screen_size.rows - 1
+        cols = self.screen_size.cols
+        clear_eol = '\x1b[m\x1b[K'
+        reverse = '\x1b[7m'
+        n_matches = len(self.search_matches)
+        if n_matches:
+            status = '/{} ({}/{})'.format(
+                self.search_query,
+                self.search_current_idx + 1,
+                n_matches)
+        else:
+            status = '/{}'.format(self.search_query)
+            if self.search_query:
+                status += ' (no matches)'
+        # truncate to screen width
+        status = status[:cols]
+        self.cmd.set_cursor_position(0, y)
+        self.print('{}{}'.format(reverse, status), end=clear_eol)
 
     def initialize(self) -> None:
         self.cmd.set_window_title('Grab – {}'.format(self.args.title))
         self.cmd.set_default_colors(cursor=self.opts.cursor)
         self._redraw()
+        if getattr(self.args, 'mode', 'normal') == 'search':
+            self._enter_search()
 
     def perform_default_key_action(self, key_event: KeyEvent) -> bool:
         return False
 
     def on_key_event(self, key_event: KeyEvent, in_bracketed_paste: bool = False) -> None:
+        if key_event.type not in [kk.PRESS, kk.REPEAT]:
+            return
+        if self.search_active:
+            self._on_search_key(key_event)
+            return
         action = self.shortcut_action(key_event)
-        if (key_event.type not in [kk.PRESS, kk.REPEAT]
-                or action is None):
+        if action is None:
             return
         self.perform_action(action)
+
+    def on_text(self, text: str, in_bracketed_paste: bool = False) -> None:
+        if self.search_active:
+            self.search_query += text
+            self._search_update()
+            self._redraw()
+
+    def _on_search_key(self, key_event: KeyEvent) -> None:
+        if key_event.matches('escape'):
+            self._exit_search(cancel=True)
+        elif key_event.matches('enter'):
+            self._search_confirm()
+        elif key_event.matches('backspace'):
+            if self.search_query:
+                self.search_query = self.search_query[:-1]
+                self._search_update()
+                self._redraw()
+        elif key_event.matches('up'):
+            if self.search_matches:
+                self.search_current_idx = (
+                    (self.search_current_idx - 1) % len(self.search_matches))
+                self._jump_to_match()
+                self._redraw()
+        elif key_event.matches('down'):
+            if self.search_matches:
+                self.search_current_idx = (
+                    (self.search_current_idx + 1) % len(self.search_matches))
+                self._jump_to_match()
+                self._redraw()
+
+    def _enter_search(self) -> None:
+        self.pre_search_point = self.point
+        self.pre_search_mark = self.mark
+        self.pre_search_mark_type = self.mark_type
+        self.pre_search_mode = self.mode
+        self.search_active = True
+        self.search_confirmed = False
+        self.search_query = ''
+        self.search_matches = []
+        self.search_current_idx = 0
+        self._redraw()
+
+    def _exit_search(self, cancel: bool = False) -> None:
+        self.search_active = False
+        if cancel:
+            self.search_query = ''
+            self.search_matches = []
+            self.search_current_idx = 0
+            self.search_confirmed = False
+            if self.pre_search_point is not None:
+                self.point = self.pre_search_point
+            self.mark = self.pre_search_mark
+            self.mark_type = self.pre_search_mark_type or NoRegion
+            self.mode = self.pre_search_mode or 'normal'
+        self._redraw()
+
+    def _search_update(self) -> None:
+        self.search_matches = self._find_all_matches()
+        if self.search_matches:
+            # jump to nearest match from current position
+            cur_line = self.point.line
+            cur_x = self.point.x
+            best_idx = 0
+            best_dist = float('inf')
+            for i, (line_no, start_col, _end_col) in enumerate(self.search_matches):
+                dist = abs(line_no - cur_line) * 10000 + abs(start_col - cur_x)
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
+            self.search_current_idx = best_idx
+            self._jump_to_match()
+        else:
+            self.search_current_idx = 0
+
+    def _find_all_matches(self) -> List[Tuple[int, ScreenColumn, ScreenColumn]]:
+        if not self.search_query:
+            return []
+        pattern = re.escape(self.search_query)
+        # smart case: insensitive unless query has uppercase
+        flags = 0 if any(c.isupper() for c in self.search_query) else re.IGNORECASE
+        try:
+            regex = re.compile(pattern, flags)
+        except re.error:
+            return []
+        matches = []  # type: List[Tuple[int, ScreenColumn, ScreenColumn]]
+        for line_idx, line in enumerate(self.lines):
+            plain = unstyled(line)
+            for m in regex.finditer(plain):
+                start_col = wcswidth(plain[:m.start()])
+                end_col = wcswidth(plain[:m.end()])
+                matches.append((line_idx + 1, start_col, end_col))
+        return matches
+
+    def _search_confirm(self) -> None:
+        self.search_active = False
+        self.search_confirmed = True
+        if self.search_matches:
+            line_no, start_col, end_col = self.search_matches[self.search_current_idx]
+            # position cursor at match start, enter visual mode with match selected
+            rows = self.screen_size.rows
+            # compute top_line to center match on screen
+            top_line = max(1, min(line_no - rows // 2,
+                                  len(self.lines) - rows + 1))
+            y = line_no - top_line
+            self.point = Position(end_col, y, top_line)
+            self.mark = Position(start_col, y, top_line)
+            self.mark_type = StreamRegion
+            self.mode = 'visual'
+        self._redraw()
+
+    def _jump_to_match(self) -> None:
+        if not self.search_matches:
+            return
+        line_no, start_col, _end_col = self.search_matches[self.search_current_idx]
+        rows = self.screen_size.rows
+        top_line = max(1, min(line_no - rows // 2,
+                              len(self.lines) - rows + 1))
+        y = line_no - top_line
+        self.point = Position(start_col, y, top_line)
+
+    def _jump_to_confirmed_match(self) -> None:
+        if not self.search_matches:
+            return
+        line_no, start_col, end_col = self.search_matches[self.search_current_idx]
+        rows = self.screen_size.rows
+        top_line = max(1, min(line_no - rows // 2,
+                              len(self.lines) - rows + 1))
+        y = line_no - top_line
+        self.point = Position(end_col, y, top_line)
+        self.mark = Position(start_col, y, top_line)
+        self.mark_type = StreamRegion
+        self.mode = 'visual'
+        self._redraw()
 
     def perform_action(self, action: Tuple[ActionName, ActionArgs]) -> None:
         func, args = action
@@ -650,6 +851,21 @@ class GrabHandler(Handler):
         self.mode = mode
         self._select('noop', self.mode_types[mode])
 
+    def search(self, *args: Any) -> None:
+        self._enter_search()
+
+    def search_next(self, *args: Any) -> None:
+        if self.search_confirmed and self.search_matches:
+            self.search_current_idx = (
+                (self.search_current_idx + 1) % len(self.search_matches))
+            self._jump_to_confirmed_match()
+
+    def search_prev(self, *args: Any) -> None:
+        if self.search_confirmed and self.search_matches:
+            self.search_current_idx = (
+                (self.search_current_idx - 1) % len(self.search_matches))
+            self._jump_to_confirmed_match()
+
     def confirm(self, *args: Any) -> None:
         start, end = self._start_end()
         self.result = {'copy': '\n'.join(
@@ -692,7 +908,13 @@ type=int
 
 
 --title
-(Internal)'''
+(Internal)
+
+
+--mode
+default=normal
+choices=normal,search
+Start in the given mode.'''
 
     try:
         args, _rest = parse_args(args[1:], ospec)

@@ -31,6 +31,15 @@ opt('cursor', '#ad7fa8',
     long_text='''
 Cursor color while grabbing.''')
 
+opt('search_foreground', '#000000',
+    option_type='to_color',
+    long_text='''
+Foreground color for search match highlights.''')
+opt('search_background', '#FFFF00',
+    option_type='to_color',
+    long_text='''
+Background color for search match highlights.''')
+
 egr()  # }}}
 
 # shortcuts {{{
@@ -113,6 +122,12 @@ Keys to enable vim-like modal selecting.'''
 map('SetMode visual', 'set_mode v                   set_mode visual')
 map('SetMode block',  'set_mode Ctrl+v              set_mode block')
 map('SetMode normal', 'set_mode Ctrl+LeftBracket    set_mode normal', long_text=long_text)
+
+long_text = '''
+Search for text in the buffer.'''
+map('Search',      'search /  search')
+map('Search next', 'search_next n  search_next')
+map('Search prev', 'search_prev N  search_prev', long_text=long_text)
 
 egr()  # }}}
 
